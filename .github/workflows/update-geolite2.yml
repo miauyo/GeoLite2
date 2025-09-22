@@ -362,17 +362,33 @@ jobs:
           # 创建 zip 归档
           zip -r "${ARCHIVE_NAME}.zip" "$ARCHIVE_NAME"
           
-          echo "✅ 归档文件创建完成:"
+          # 复制单独的 mmdb 文件到 releases 目录
+          echo "📋 复制单独的 mmdb 文件..."
+          cp "$ARCHIVE_NAME"/*.mmdb ./
+          
+          # 列出所有可用的文件
+          echo "📁 可用文件列表:"
+          ls -la *.mmdb *.tar.gz *.zip
+          
+          echo "✅ 归档文件和单独文件创建完成:"
           echo "   📦 ${ARCHIVE_NAME}.tar.gz"
           echo "   📦 ${ARCHIVE_NAME}.zip"
+          echo "   📄 单独的 .mmdb 文件:"
+          for mmdb in *.mmdb; do
+            echo "      📄 $mmdb"
+          done
           
-          # 计算归档文件大小
+          # 计算文件大小
           TAR_SIZE=$(du -h "${ARCHIVE_NAME}.tar.gz" | cut -f1)
           ZIP_SIZE=$(du -h "${ARCHIVE_NAME}.zip" | cut -f1)
           
           echo "📊 文件大小:"
           echo "   tar.gz: $TAR_SIZE"
           echo "   zip: $ZIP_SIZE"
+          for mmdb in *.mmdb; do
+            MMDB_SIZE=$(du -h "$mmdb" | cut -f1)
+            echo "   $mmdb: $MMDB_SIZE"
+          done
           
       # 10. 创建 GitHub Release
       - name: 创建 GitHub Release
@@ -398,17 +414,25 @@ jobs:
           - **GeoLite2-Country.mmdb** - 国家级地理位置数据库
           
           ## 📥 下载选项
-          - **tar.gz 格式**: 适用于 Linux/macOS 系统
-          - **zip 格式**: 适用于 Windows 系统
+          - **tar.gz 格式**: 适用于 Linux/macOS 系统，包含所有数据库文件
+          - **zip 格式**: 适用于 Windows 系统，包含所有数据库文件
+          - **单独 .mmdb 文件**: 直接下载单个数据库文件，适用于只需要特定数据库的场景
           
           ## 🔐 文件完整性
           每个下载包都包含 \`checksums.txt\` 文件，包含所有数据库文件的 MD5 和 SHA256 校验和。
           
           ## 📝 使用说明
-          1. 下载适合您系统的归档文件
+          
+          ### 使用归档文件 (推荐)
+          1. 下载适合您系统的归档文件 (.tar.gz 或 .zip)
           2. 解压缩文件
           3. 使用 \`checksums.txt\` 验证文件完整性
           4. 将 .mmdb 文件部署到您的应用程序中
+          
+          ### 使用单独的 .mmdb 文件
+          1. 直接下载所需的 .mmdb 文件 (如 GeoLite2-Country.mmdb)
+          2. 将文件部署到您的应用程序中
+          3. 注意：单独下载的文件无法使用 checksums.txt 验证完整性
           
           ## 🔗 相关链接
           - [MaxMind GeoLite2 文档](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
@@ -419,13 +443,14 @@ jobs:
           > 此版本由 GitHub Actions 自动生成和发布
           EOF
           
-          # 创建 release
+          # 创建 release 并上传所有文件
           gh release create "$VERSION" \
             --title "GeoLite2 数据库 $VERSION" \
             --notes-file release_notes.md \
             --latest \
             "releases/${ARCHIVE_NAME}.tar.gz" \
-            "releases/${ARCHIVE_NAME}.zip"
+            "releases/${ARCHIVE_NAME}.zip" \
+            releases/*.mmdb
           
           echo "✅ GitHub Release 创建成功: $VERSION"
           echo "release_created=true" >> $GITHUB_OUTPUT

@@ -1,0 +1,393 @@
+name: Update GeoLite2 Databases
+
+# 工作流触发条件
+on:
+  # 定时触发：每周四 00:00 UTC
+  schedule:
+    - cron: '0 0 * * 4'
+  
+  # 手动触发选项
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: '强制更新（忽略版本检查）'
+        required: false
+        default: 'false'
+        type: boolean
+      skip_cleanup:
+        description: '跳过旧版本清理'
+        required: false
+        default: 'false'
+        type: boolean
+
+# 工作流权限设置（最小必要权限原则）
+permissions:
+  contents: write
+  actions: read
+  security-events: write
+
+# 环境变量
+env:
+  MAXMIND_LICENSE_KEY: ${{ secrets.MAXMIND_LICENSE_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+jobs:
+  update-geolite2:
+    name: 更新 GeoLite2 数据库
+    runs-on: ubuntu-latest
+    
+    # 超时设置（30分钟）
+    timeout-minutes: 30
+    
+    steps:
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      # 2. 设置工作环境
+      - name: 设置工作环境
+        run: |
+          echo "🚀 开始 GeoLite2 数据库更新工作流"
+          echo "📅 触发时间: $(date -u)"
+          echo "🔧 运行环境: ${{ runner.os }}"
+          
+          # 创建工作目录
+          mkdir -p downloads
+          mkdir -p releases
+          mkdir -p logs
+          
+          # 设置日志文件
+          echo "LOG_FILE=logs/update-$(date +%Y%m%d-%H%M%S).log" >> $GITHUB_ENV
+          
+      # 3. 验证 MaxMind 许可证密钥
+      - name: 验证 MaxMind 许可证
+        run: |
+          if [ -z "$MAXMIND_LICENSE_KEY" ]; then
+            echo "❌ 错误: MAXMIND_LICENSE_KEY 未设置"
+            echo "请在 GitHub Secrets 中设置 MaxMind 许可证密钥"
+            exit 1
+          fi
+          echo "✅ MaxMind 许可证密钥已验证"
+          
+      # 4. 获取当前版本信息
+      - name: 获取当前版本信息
+        id: current_version
+        run: |
+          # 获取最新的 release 版本
+          LATEST_RELEASE=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || echo "")
+          
+          if [ -z "$LATEST_RELEASE" ]; then
+            echo "📝 未找到现有版本，这是首次运行"
+            echo "current_version=" >> $GITHUB_OUTPUT
+          else
+            echo "📝 当前版本: $LATEST_RELEASE"
+            echo "current_version=$LATEST_RELEASE" >> $GITHUB_OUTPUT
+          fi
+          
+      # 5. 检查 MaxMind 数据库版本
+      - name: 检查 MaxMind 数据库版本
+        id: check_version
+        run: |
+          echo "🔍 检查 MaxMind 数据库版本..."
+          
+          # 获取 GeoLite2-City 数据库的最新版本信息
+          CITY_URL="https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz"
+          
+          # 下载并检查版本
+          curl -s -I "$CITY_URL" > city_headers.txt
+          
+          # 从 Content-Disposition 头部提取版本信息
+          CONTENT_DISP=$(grep -i "content-disposition" city_headers.txt || echo "")
+          
+          if [ -n "$CONTENT_DISP" ]; then
+            # 提取日期作为版本号 (格式: YYYYMMDD)
+            VERSION_DATE=$(echo "$CONTENT_DISP" | grep -oE '[0-9]{8}' | head -1)
+            if [ -z "$VERSION_DATE" ]; then
+              VERSION_DATE=$(date +%Y%m%d)
+            fi
+          else
+            VERSION_DATE=$(date +%Y%m%d)
+          fi
+          
+          NEW_VERSION="v$VERSION_DATE"
+          echo "📊 检测到版本: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          
+          # 检查是否需要更新
+          CURRENT_VERSION="${{ steps.current_version.outputs.current_version }}"
+          FORCE_UPDATE="${{ github.event.inputs.force_update }}"
+          
+          if [ "$FORCE_UPDATE" = "true" ]; then
+            echo "🔄 强制更新模式已启用"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+          elif [ "$NEW_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "✅ 发现新版本，需要更新"
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+          else
+            echo "ℹ️ 已是最新版本，无需更新"
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+          fi
+          
+      # 6. 下载 GeoLite2 数据库
+      - name: 下载 GeoLite2 数据库
+        if: steps.check_version.outputs.needs_update == 'true'
+        id: download
+        run: |
+          echo "📥 开始下载 GeoLite2 数据库..."
+          
+          # 定义数据库类型
+          DATABASES=("GeoLite2-ASN" "GeoLite2-City" "GeoLite2-Country")
+          
+          # 下载每个数据库
+          for DB in "${DATABASES[@]}"; do
+            echo "📥 下载 $DB..."
+            
+            URL="https://download.maxmind.com/app/geoip_download?edition_id=$DB&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz"
+            
+            # 下载文件
+            if curl -L -o "downloads/${DB}.tar.gz" "$URL"; then
+              echo "✅ $DB 下载成功"
+              
+              # 解压文件
+              cd downloads
+              tar -xzf "${DB}.tar.gz"
+              
+              # 查找 .mmdb 文件并重命名
+              MMDB_FILE=$(find . -name "${DB}_*.mmdb" | head -1)
+              if [ -n "$MMDB_FILE" ]; then
+                mv "$MMDB_FILE" "${DB}.mmdb"
+                echo "✅ $DB.mmdb 提取成功"
+              else
+                echo "❌ 未找到 $DB.mmdb 文件"
+                exit 1
+              fi
+              
+              cd ..
+            else
+              echo "❌ $DB 下载失败"
+              exit 1
+            fi
+          done
+          
+          echo "download_success=true" >> $GITHUB_OUTPUT
+          
+      # 7. 文件完整性校验
+      - name: 文件完整性校验
+        if: steps.download.outputs.download_success == 'true'
+        run: |
+          echo "🔐 执行文件完整性校验..."
+          
+          cd downloads
+          
+          # 生成校验和文件
+          echo "# GeoLite2 数据库文件校验和" > checksums.txt
+          echo "# 生成时间: $(date -u)" >> checksums.txt
+          echo "" >> checksums.txt
+          
+          for file in *.mmdb; do
+            if [ -f "$file" ]; then
+              echo "🔍 校验 $file..."
+              
+              # 生成 MD5 和 SHA256
+              MD5=$(md5sum "$file" | cut -d' ' -f1)
+              SHA256=$(sha256sum "$file" | cut -d' ' -f1)
+              
+              echo "## $file" >> checksums.txt
+              echo "MD5: $MD5" >> checksums.txt
+              echo "SHA256: $SHA256" >> checksums.txt
+              echo "" >> checksums.txt
+              
+              echo "✅ $file 校验完成"
+              echo "   MD5: $MD5"
+              echo "   SHA256: $SHA256"
+            fi
+          done
+          
+          echo "✅ 所有文件校验完成"
+          
+      # 8. 压缩和打包
+      - name: 压缩和打包文件
+        if: steps.download.outputs.download_success == 'true'
+        run: |
+          echo "📦 开始压缩和打包文件..."
+          
+          VERSION="${{ steps.check_version.outputs.new_version }}"
+          ARCHIVE_NAME="GeoLite2-Databases-$VERSION"
+          
+          cd downloads
+          
+          # 创建发布目录
+          mkdir -p "../releases/$ARCHIVE_NAME"
+          
+          # 复制 .mmdb 文件和校验和文件
+          cp *.mmdb "../releases/$ARCHIVE_NAME/"
+          cp checksums.txt "../releases/$ARCHIVE_NAME/"
+          
+          # 创建 README 文件
+          cat > "../releases/$ARCHIVE_NAME/README.md" << EOF
+          # GeoLite2 数据库 $VERSION
+          
+          ## 包含的数据库
+          - **GeoLite2-ASN.mmdb**: ASN (自治系统号) 数据库
+          - **GeoLite2-City.mmdb**: 城市级地理位置数据库  
+          - **GeoLite2-Country.mmdb**: 国家级地理位置数据库
+          
+          ## 文件信息
+          - 版本: $VERSION
+          - 更新时间: $(date -u)
+          - 数据来源: MaxMind GeoLite2
+          
+          ## 使用说明
+          这些数据库文件可以与支持 MaxMind DB 格式的应用程序一起使用。
+          
+          ## 许可证
+          这些数据库在 MaxMind GeoLite2 许可证下提供。
+          详情请参阅: https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+          
+          ## 校验和
+          请参阅 checksums.txt 文件以验证文件完整性。
+          EOF
+          
+          cd "../releases"
+          
+          # 创建 tar.gz 归档
+          tar -czf "${ARCHIVE_NAME}.tar.gz" "$ARCHIVE_NAME"
+          
+          # 创建 zip 归档
+          zip -r "${ARCHIVE_NAME}.zip" "$ARCHIVE_NAME"
+          
+          echo "✅ 归档文件创建完成:"
+          echo "   📦 ${ARCHIVE_NAME}.tar.gz"
+          echo "   📦 ${ARCHIVE_NAME}.zip"
+          
+          # 计算归档文件大小
+          TAR_SIZE=$(du -h "${ARCHIVE_NAME}.tar.gz" | cut -f1)
+          ZIP_SIZE=$(du -h "${ARCHIVE_NAME}.zip" | cut -f1)
+          
+          echo "📊 文件大小:"
+          echo "   tar.gz: $TAR_SIZE"
+          echo "   zip: $ZIP_SIZE"
+          
+      # 9. 创建 GitHub Release
+      - name: 创建 GitHub Release
+        if: steps.download.outputs.download_success == 'true'
+        id: create_release
+        run: |
+          echo "🚀 创建 GitHub Release..."
+          
+          VERSION="${{ steps.check_version.outputs.new_version }}"
+          ARCHIVE_NAME="GeoLite2-Databases-$VERSION"
+          
+          # 生成变更日志
+          cat > release_notes.md << EOF
+          # GeoLite2 数据库更新 $VERSION
+          
+          ## 📊 数据库信息
+          - **版本**: $VERSION
+          - **更新时间**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - **数据来源**: MaxMind GeoLite2 免费地理位置数据
+          
+          ## 📦 包含的数据库
+          - **GeoLite2-ASN.mmdb** - ASN (自治系统号) 数据库
+          - **GeoLite2-City.mmdb** - 城市级地理位置数据库
+          - **GeoLite2-Country.mmdb** - 国家级地理位置数据库
+          
+          ## 📥 下载选项
+          - **tar.gz 格式**: 适用于 Linux/macOS 系统
+          - **zip 格式**: 适用于 Windows 系统
+          
+          ## 🔐 文件完整性
+          每个下载包都包含 \`checksums.txt\` 文件，包含所有数据库文件的 MD5 和 SHA256 校验和。
+          
+          ## 📝 使用说明
+          1. 下载适合您系统的归档文件
+          2. 解压缩文件
+          3. 使用 \`checksums.txt\` 验证文件完整性
+          4. 将 .mmdb 文件部署到您的应用程序中
+          
+          ## 🔗 相关链接
+          - [MaxMind GeoLite2 文档](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data)
+          - [MaxMind DB 格式规范](https://maxmind.github.io/MaxMind-DB/)
+          
+          ---
+          
+          > 此版本由 GitHub Actions 自动生成和发布
+          EOF
+          
+          # 创建 release
+          gh release create "$VERSION" \
+            --title "GeoLite2 数据库 $VERSION" \
+            --notes-file release_notes.md \
+            --latest \
+            "releases/${ARCHIVE_NAME}.tar.gz" \
+            "releases/${ARCHIVE_NAME}.zip"
+          
+          echo "✅ GitHub Release 创建成功: $VERSION"
+          echo "release_created=true" >> $GITHUB_OUTPUT
+          
+      # 10. 清理旧版本
+      - name: 清理旧版本
+        if: steps.create_release.outputs.release_created == 'true' && github.event.inputs.skip_cleanup != 'true'
+        run: |
+          echo "🧹 清理旧版本 Release..."
+          
+          # 获取所有 releases，按创建时间排序
+          RELEASES=$(gh release list --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[3:] | .[].tagName')
+          
+          if [ -n "$RELEASES" ]; then
+            echo "📝 发现需要清理的旧版本:"
+            echo "$RELEASES"
+            
+            # 删除旧版本
+            for release in $RELEASES; do
+              echo "🗑️ 删除版本: $release"
+              gh release delete "$release" --yes
+            done
+            
+            echo "✅ 旧版本清理完成"
+          else
+            echo "ℹ️ 无需清理，版本数量未超过限制"
+          fi
+          
+      # 11. 清理敏感数据和临时文件
+      - name: 清理敏感数据
+        if: always()
+        run: |
+          echo "🧹 清理敏感数据和临时文件..."
+          
+          # 清理下载的文件
+          rm -rf downloads/
+          rm -rf releases/
+          rm -f city_headers.txt
+          rm -f release_notes.md
+          
+          # 清理环境变量中的敏感信息
+          unset MAXMIND_LICENSE_KEY
+          
+          echo "✅ 清理完成"
+          
+      # 12. 工作流状态通知
+      - name: 工作流状态通知
+        if: always()
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "🎉 GeoLite2 数据库更新工作流执行成功!"
+            echo "✅ 状态: 成功"
+            if [ "${{ steps.check_version.outputs.needs_update }}" = "true" ]; then
+              echo "📦 新版本: ${{ steps.check_version.outputs.new_version }}"
+              echo "🔗 Release 链接: ${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.check_version.outputs.new_version }}"
+            else
+              echo "ℹ️ 无需更新，已是最新版本"
+            fi
+          else
+            echo "❌ GeoLite2 数据库更新工作流执行失败!"
+            echo "❌ 状态: 失败"
+            echo "📝 请检查工作流日志以获取详细错误信息"
+          fi
+          
+          echo "⏰ 执行时间: $(date -u)"
+          echo "🔧 运行环境: ${{ runner.os }}"
+          echo "📊 工作流: ${{ github.workflow }}"
+          echo "🔗 运行链接: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

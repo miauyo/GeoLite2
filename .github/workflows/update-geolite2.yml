@@ -71,7 +71,34 @@ jobs:
           fi
           echo "✅ MaxMind 许可证密钥已验证"
           
-      # 4. 获取当前版本信息
+      # 4. 测试 MaxMind API 连接
+      - name: 测试 MaxMind API 连接
+        run: |
+          echo "🔗 测试 MaxMind API 连接..."
+          
+          # 测试基本连接
+          TEST_URL="https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz"
+          
+          echo "🌐 测试连接到 MaxMind 服务器..."
+          HTTP_CODE=$(curl -s -I -w "%{http_code}" -o /dev/null "${TEST_URL}")
+          
+          echo "📊 连接测试结果: HTTP $HTTP_CODE"
+          
+          case $HTTP_CODE in
+            200)
+              echo "✅ MaxMind API 连接正常"
+              ;;
+            401|403)
+              echo "❌ 认证失败: 许可证密钥无效或无权限"
+              echo "💡 请检查 GitHub Secrets 中的 MAXMIND_LICENSE_KEY"
+              exit 1
+              ;;
+            *)
+              echo "⚠️ 连接异常 (HTTP $HTTP_CODE)，但继续执行"
+              ;;
+          esac
+          
+      # 5. 获取当前版本信息
       - name: 获取当前版本信息
         id: current_version
         run: |
@@ -86,7 +113,7 @@ jobs:
             echo "current_version=$LATEST_RELEASE" >> $GITHUB_OUTPUT
           fi
           
-      # 5. 检查 MaxMind 数据库版本
+      # 6. 检查 MaxMind 数据库版本
       - name: 检查 MaxMind 数据库版本
         id: check_version
         run: |
@@ -130,15 +157,25 @@ jobs:
             echo "needs_update=false" >> $GITHUB_OUTPUT
           fi
           
-      # 6. 下载 GeoLite2 数据库
+      # 7. 下载 GeoLite2 数据库
       - name: 下载 GeoLite2 数据库
         if: steps.check_version.outputs.needs_update == 'true'
         id: download
         run: |
           echo "📥 开始下载 GeoLite2 数据库..."
           
+          # 验证许可证密钥格式
+          if [[ ! "$MAXMIND_LICENSE_KEY" =~ ^[A-Za-z0-9]{16}$ ]]; then
+            echo "⚠️ 警告: MaxMind 许可证密钥格式可能不正确"
+            echo "许可证密钥长度: ${#MAXMIND_LICENSE_KEY}"
+          fi
+          
           # 定义数据库类型
           DATABASES=("GeoLite2-ASN" "GeoLite2-City" "GeoLite2-Country")
+          
+          # 创建下载目录并设置权限
+          mkdir -p downloads
+          chmod 755 downloads
           
           # 下载每个数据库
           for DB in "${DATABASES[@]}"; do
@@ -146,34 +183,102 @@ jobs:
             
             URL="https://download.maxmind.com/app/geoip_download?edition_id=$DB&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz"
             
-            # 下载文件
-            if curl -L -o "downloads/${DB}.tar.gz" "$URL"; then
-              echo "✅ $DB 下载成功"
+            # 下载文件并显示详细信息
+            echo "🌐 下载URL: ${URL%&license_key=*}&license_key=***"
+            
+            HTTP_CODE=$(curl -L -w "%{http_code}" -o "downloads/${DB}.tar.gz" "$URL")
+            
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "✅ $DB 下载成功 (HTTP $HTTP_CODE)"
               
-              # 解压文件
-              cd downloads
-              tar -xzf "${DB}.tar.gz"
-              
-              # 查找 .mmdb 文件并重命名
-              MMDB_FILE=$(find . -name "${DB}_*.mmdb" | head -1)
-              if [ -n "$MMDB_FILE" ]; then
-                mv "$MMDB_FILE" "${DB}.mmdb"
-                echo "✅ $DB.mmdb 提取成功"
-              else
-                echo "❌ 未找到 $DB.mmdb 文件"
+              # 验证下载的文件
+              if [ ! -f "downloads/${DB}.tar.gz" ]; then
+                echo "❌ 错误: 下载的文件不存在"
                 exit 1
               fi
               
+              DOWNLOAD_SIZE=$(stat -c%s "downloads/${DB}.tar.gz" 2>/dev/null || stat -f%z "downloads/${DB}.tar.gz" 2>/dev/null || echo "0")
+              echo "📊 下载文件大小: $DOWNLOAD_SIZE 字节"
+              
+              if [ "$DOWNLOAD_SIZE" -lt 1000 ]; then
+                echo "❌ 错误: 下载的文件太小，可能是错误页面"
+                echo "📄 文件内容预览:"
+                head -n 10 "downloads/${DB}.tar.gz" || true
+                exit 1
+              fi
+              
+              # 解压文件到临时目录
+              cd downloads
+              mkdir -p "${DB}_temp"
+              tar -xzf "${DB}.tar.gz" -C "${DB}_temp"
+              
+              # 查找 .mmdb 文件（支持多层目录结构）
+              echo "🔍 在 ${DB}_temp 中查找 .mmdb 文件..."
+              find "${DB}_temp" -type f -name "*.mmdb" -exec ls -la {} \;
+              
+              MMDB_FILE=$(find "${DB}_temp" -type f -name "*.mmdb" | head -1)
+              
+              if [ -n "$MMDB_FILE" ] && [ -f "$MMDB_FILE" ]; then
+                # 复制并重命名 .mmdb 文件
+                cp "$MMDB_FILE" "${DB}.mmdb"
+                echo "✅ $DB.mmdb 提取成功"
+                echo "📁 原始文件路径: $MMDB_FILE"
+                
+                # 验证文件大小
+                FILE_SIZE=$(stat -c%s "${DB}.mmdb" 2>/dev/null || stat -f%z "${DB}.mmdb" 2>/dev/null || echo "0")
+                echo "📊 文件大小: $FILE_SIZE 字节"
+                
+                if [ "$FILE_SIZE" -eq 0 ]; then
+                  echo "❌ 错误: $DB.mmdb 文件大小为0"
+                  exit 1
+                fi
+              else
+                echo "❌ 未找到 $DB 的 .mmdb 文件"
+                echo "📂 ${DB}_temp 目录内容:"
+                find "${DB}_temp" -type f -exec ls -la {} \;
+                exit 1
+              fi
+              
+              # 清理临时目录
+              rm -rf "${DB}_temp"
+              rm -f "${DB}.tar.gz"
+              
               cd ..
             else
-              echo "❌ $DB 下载失败"
+              echo "❌ $DB 下载失败 (HTTP $HTTP_CODE)"
+              
+              case $HTTP_CODE in
+                401|403)
+                  echo "🔑 认证失败: 请检查 MAXMIND_LICENSE_KEY 是否正确"
+                  echo "💡 提示: 确保许可证密钥有效且具有下载权限"
+                  ;;
+                404)
+                  echo "📂 文件不存在: $DB 数据库可能暂时不可用"
+                  ;;
+                429)
+                  echo "⏰ 请求过于频繁: 请稍后重试"
+                  ;;
+                500|502|503)
+                  echo "🔧 服务器错误: MaxMind 服务可能暂时不可用"
+                  ;;
+                *)
+                  echo "🌐 网络错误: HTTP状态码 $HTTP_CODE"
+                  ;;
+              esac
+              
+              # 显示可能的错误响应内容
+              if [ -f "downloads/${DB}.tar.gz" ]; then
+                echo "📄 响应内容预览:"
+                head -n 5 "downloads/${DB}.tar.gz" || true
+              fi
+              
               exit 1
             fi
           done
           
           echo "download_success=true" >> $GITHUB_OUTPUT
           
-      # 7. 文件完整性校验
+      # 8. 文件完整性校验
       - name: 文件完整性校验
         if: steps.download.outputs.download_success == 'true'
         run: |
@@ -207,7 +312,7 @@ jobs:
           
           echo "✅ 所有文件校验完成"
           
-      # 8. 压缩和打包
+      # 9. 压缩和打包
       - name: 压缩和打包文件
         if: steps.download.outputs.download_success == 'true'
         run: |
@@ -270,7 +375,7 @@ jobs:
           echo "   tar.gz: $TAR_SIZE"
           echo "   zip: $ZIP_SIZE"
           
-      # 9. 创建 GitHub Release
+      # 10. 创建 GitHub Release
       - name: 创建 GitHub Release
         if: steps.download.outputs.download_success == 'true'
         id: create_release
@@ -327,7 +432,7 @@ jobs:
           echo "✅ GitHub Release 创建成功: $VERSION"
           echo "release_created=true" >> $GITHUB_OUTPUT
           
-      # 10. 清理旧版本
+      # 11. 清理旧版本
       - name: 清理旧版本
         if: steps.create_release.outputs.release_created == 'true' && github.event.inputs.skip_cleanup != 'true'
         run: |
@@ -351,7 +456,7 @@ jobs:
             echo "ℹ️ 无需清理，版本数量未超过限制"
           fi
           
-      # 11. 清理敏感数据和临时文件
+      # 12. 清理敏感数据和临时文件
       - name: 清理敏感数据
         if: always()
         run: |
@@ -368,7 +473,7 @@ jobs:
           
           echo "✅ 清理完成"
           
-      # 12. 工作流状态通知
+      # 13. 工作流状态通知
       - name: 工作流状态通知
         if: always()
         run: |

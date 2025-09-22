@@ -1,6 +1,6 @@
 # GeoLite2 数据库
 
-自动从 MaxMind 官网下载和发布 GeoLite2 数据库（ASN、City 和 Country）
+自动从 MaxMind 官网下载和发布 GeoLite2 数据库（ASN 和 Country）
 
 ## 🚀 功能特性
 
@@ -84,7 +84,6 @@
 ```
 GeoLite2-Databases-vYYYYMMDD/
 ├── GeoLite2-ASN.mmdb          # ASN 数据库
-├── GeoLite2-City.mmdb         # 城市数据库
 ├── GeoLite2-Country.mmdb      # 国家数据库
 ├── checksums.txt              # 文件校验和
 └── README.md                  # 使用说明

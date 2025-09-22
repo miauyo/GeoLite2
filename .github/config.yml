@@ -6,7 +6,6 @@ databases:
   # 要下载的 GeoLite2 数据库类型
   types:
     - "GeoLite2-ASN"
-    - "GeoLite2-City" 
     - "GeoLite2-Country"
   
   # MaxMind 下载 URL 模板

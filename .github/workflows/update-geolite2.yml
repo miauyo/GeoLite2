@@ -119,14 +119,14 @@ jobs:
         run: |
           echo "🔍 检查 MaxMind 数据库版本..."
           
-          # 获取 GeoLite2-City 数据库的最新版本信息
-          CITY_URL="https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-City&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz"
+          # 获取 GeoLite2-Country 数据库的最新版本信息
+          COUNTRY_URL="https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country&license_key=$MAXMIND_LICENSE_KEY&suffix=tar.gz"
           
           # 下载并检查版本
-          curl -s -I "$CITY_URL" > city_headers.txt
+          curl -s -I "$COUNTRY_URL" > country_headers.txt
           
           # 从 Content-Disposition 头部提取版本信息
-          CONTENT_DISP=$(grep -i "content-disposition" city_headers.txt || echo "")
+          CONTENT_DISP=$(grep -i "content-disposition" country_headers.txt || echo "")
           
           if [ -n "$CONTENT_DISP" ]; then
             # 提取日期作为版本号 (格式: YYYYMMDD)
@@ -171,7 +171,7 @@ jobs:
           fi
           
           # 定义数据库类型
-          DATABASES=("GeoLite2-ASN" "GeoLite2-City" "GeoLite2-Country")
+          DATABASES=("GeoLite2-ASN" "GeoLite2-Country")
           
           # 创建下载目录并设置权限
           mkdir -p downloads
@@ -336,7 +336,6 @@ jobs:
           
           ## 包含的数据库
           - **GeoLite2-ASN.mmdb**: ASN (自治系统号) 数据库
-          - **GeoLite2-City.mmdb**: 城市级地理位置数据库  
           - **GeoLite2-Country.mmdb**: 国家级地理位置数据库
           
           ## 文件信息
@@ -396,7 +395,6 @@ jobs:
           
           ## 📦 包含的数据库
           - **GeoLite2-ASN.mmdb** - ASN (自治系统号) 数据库
-          - **GeoLite2-City.mmdb** - 城市级地理位置数据库
           - **GeoLite2-Country.mmdb** - 国家级地理位置数据库
           
           ## 📥 下载选项
@@ -465,7 +463,7 @@ jobs:
           # 清理下载的文件
           rm -rf downloads/
           rm -rf releases/
-          rm -f city_headers.txt
+          rm -f country_headers.txt
           rm -f release_notes.md
           
           # 清理环境变量中的敏感信息
